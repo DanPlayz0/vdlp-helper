@@ -6,13 +6,23 @@ import time
 import subprocess
 from datetime import datetime, timedelta
 
-from flask import Flask, request, redirect, url_for, send_file, render_template_string
+from flask import (
+    Flask,
+    request,
+    redirect,
+    url_for,
+    send_file,
+    render_template_string,
+    Response,
+    abort
+)
+
 import yt_dlp
 
 app = Flask(__name__)
 
-DB_FILE = "database.json"
 DOWNLOAD_DIR = "downloads"
+DB_FILE = os.path.join(DOWNLOAD_DIR, "database.json")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -49,7 +59,7 @@ def cleanup_loop():
             if now - created > timedelta(hours=24):
                 filepath = db[vid]["file"]
 
-                if os.path.exists(filepath):
+                if filepath and os.path.exists(filepath):
                     os.remove(filepath)
 
                 del db[vid]
@@ -58,7 +68,7 @@ def cleanup_loop():
         if changed:
             save_db(db)
 
-        time.sleep(3600)
+        time.sleep(1800)
 
 
 threading.Thread(target=cleanup_loop, daemon=True).start()
@@ -78,6 +88,7 @@ def download_video(video_id, url):
         ydl_opts = {
             "outtmpl": filepath,
             "format": "mp4/best",
+            "postprocessor_args": ["-movflags", "+faststart"]
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -190,23 +201,94 @@ def video_page(video_id):
     """, video=video)
 
 
+# -------------------------
+# RANGE STREAMING SUPPORT
+# -------------------------
+
 @app.route("/stream/<video_id>")
 def stream(video_id):
     db = load_db()
-    video = db[video_id]
-    return send_file(video["file"])
+
+    if video_id not in db:
+        return abort(404)
+
+    path = db[video_id]["file"]
+
+    if not path or not os.path.exists(path):
+        return abort(404)
+
+    file_size = os.path.getsize(path)
+    range_header = request.headers.get("Range", None)
+
+    if not range_header:
+        def generateRange():
+            with open(path, "rb") as f:
+                yield from f
+
+        return Response(
+            generateRange(),
+            status=200,
+            mimetype="video/mp4",
+            headers={
+                "Content-Length": str(file_size),
+                "Accept-Ranges": "bytes"
+            }
+        )
+
+    # Parse Range header
+    bytes_range = range_header.replace("bytes=", "")
+    start, end = bytes_range.split("-")
+
+    start = int(start) if start else 0
+    end = int(end) if end else file_size - 1
+
+    length = end - start + 1
+
+    def generate():
+        with open(path, "rb") as f:
+            f.seek(start)
+            remaining = length
+            chunk_size = 8192
+
+            while remaining > 0:
+                read_size = min(chunk_size, remaining)
+                data = f.read(read_size)
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+
+    return Response(
+        generate(),
+        status=206,
+        mimetype="video/mp4",
+        headers={
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(length),
+        },
+    )
 
 
 @app.route("/download/<video_id>")
 def download(video_id):
     db = load_db()
+
+    if video_id not in db:
+        return abort(404)
+
     video = db[video_id]
+
     return send_file(video["file"], as_attachment=True)
 
 
 @app.route("/rotate/<video_id>/<angle>", methods=["POST"])
 def rotate(video_id, angle):
     db = load_db()
+
+    if video_id not in db:
+        return abort(404)
+
     video = db[video_id]
 
     input_file = video["file"]
