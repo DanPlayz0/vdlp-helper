@@ -1,0 +1,9 @@
+services:
+  downloader:
+    build: .
+    ports:
+      - "5000"
+    volumes:
+      - ./downloads:/app/downloads
+      - ./database.json:/app/database.json
+    restart: unless-stopped
