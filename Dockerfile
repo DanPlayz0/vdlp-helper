@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 # Install ffmpeg
 RUN apt-get update && apt-get install -y \
-    ffmpeg \
+    ffmpeg curl-impersonate \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
