@@ -13,7 +13,6 @@ from flask import (
     url_for,
     send_file,
     render_template_string,
-    Response,
     abort
 )
 
@@ -57,10 +56,18 @@ def cleanup_loop():
         for vid in list(db.keys()):
             created = datetime.fromisoformat(db[vid]["created"])
             if now - created > timedelta(hours=24):
-                filepath = db[vid]["file"]
 
+                # delete mp4
+                filepath = db[vid].get("file")
                 if filepath and os.path.exists(filepath):
                     os.remove(filepath)
+
+                # delete hls folder
+                hls_dir = db[vid].get("hls")
+                if hls_dir and os.path.exists(hls_dir):
+                    for f in os.listdir(hls_dir):
+                        os.remove(os.path.join(hls_dir, f))
+                    os.rmdir(hls_dir)
 
                 del db[vid]
                 changed = True
@@ -75,6 +82,28 @@ threading.Thread(target=cleanup_loop, daemon=True).start()
 
 
 # -------------------------
+# HLS conversion
+# -------------------------
+
+def start_hls_conversion(input_path, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", input_path,
+        "-c", "copy",
+        "-f", "hls",
+        "-hls_time", "6",
+        "-hls_list_size", "0",
+        "-hls_flags", "delete_segments+append_list",
+        os.path.join(output_dir, "playlist.m3u8")
+    ]
+
+    subprocess.Popen(cmd)
+
+
+# -------------------------
 # Download worker
 # -------------------------
 
@@ -83,25 +112,48 @@ def download_video(video_id, url):
 
     filename = f"{video_id}.mp4"
     filepath = os.path.join(DOWNLOAD_DIR, filename)
+    hls_dir = os.path.join(DOWNLOAD_DIR, f"{video_id}_hls")
+
+    db[video_id]["file"] = filepath
+    db[video_id]["hls"] = hls_dir
+    save_db(db)
 
     try:
         ydl_opts = {
             "outtmpl": filepath,
-            "format": "mp4/best",
+            "format": "bv*+ba/best",
+            "merge_output_format": "mp4",
+            "postprocessors": [{
+                "key": "FFmpegVideoRemuxer",
+                "preferedformat": "mp4"
+            }],
             "postprocessor_args": ["-movflags", "+faststart"]
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        # Start download in background
+        def run_download():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
 
-        db[video_id]["status"] = "ready"
-        db[video_id]["file"] = filepath
+            db = load_db()
+            db[video_id]["status"] = "ready"
+            save_db(db)
+
+        threading.Thread(target=run_download, daemon=True).start()
+
+        # Wait until file starts growing then start HLS
+        while not os.path.exists(filepath):
+            time.sleep(1)
+
+        start_hls_conversion(filepath, hls_dir)
+
+        db[video_id]["status"] = "processing"
+        save_db(db)
 
     except Exception as e:
         db[video_id]["status"] = "failed"
         db[video_id]["error"] = str(e)
-
-    save_db(db)
+        save_db(db)
 
 
 # -------------------------
@@ -122,7 +174,8 @@ def home():
             "url": url,
             "status": "processing",
             "created": datetime.utcnow().isoformat(),
-            "file": ""
+            "file": "",
+            "hls": ""
         }
 
         save_db(db)
@@ -172,29 +225,40 @@ def video_page(video_id):
 
     <p>Status: {{video.status}}</p>
 
-    {% if video.status == "ready" %}
+    <video id="video" width="400" controls playsinline></video>
 
-        <video width="400" controls src="/stream/{{video.id}}"></video>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 
-        <br><br>
+    <script>
+    const video = document.getElementById('video');
+    const src = "/hls/{{video.id}}/playlist.m3u8";
 
-        <a href="/download/{{video.id}}">Download</a>
+    if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = src;
+    } else if (Hls.isSupported()) {
+        const hls = new Hls();
+        hls.loadSource(src);
+        hls.attachMedia(video);
+    }
+    </script>
 
-        <h3>Rotate</h3>
+    <br><br>
 
-        <form method="POST" action="/rotate/{{video.id}}/90">
-            <button>Rotate 90°</button>
-        </form>
+    <a href="/download/{{video.id}}">Download MP4</a>
 
-        <form method="POST" action="/rotate/{{video.id}}/180">
-            <button>Rotate 180°</button>
-        </form>
+    <h3>Rotate</h3>
 
-        <form method="POST" action="/rotate/{{video.id}}/270">
-            <button>Rotate 270°</button>
-        </form>
+    <form method="POST" action="/rotate/{{video.id}}/90">
+        <button>Rotate 90°</button>
+    </form>
 
-    {% endif %}
+    <form method="POST" action="/rotate/{{video.id}}/180">
+        <button>Rotate 180°</button>
+    </form>
+
+    <form method="POST" action="/rotate/{{video.id}}/270">
+        <button>Rotate 270°</button>
+    </form>
 
     <br><br>
     <a href="/">Back</a>
@@ -202,28 +266,24 @@ def video_page(video_id):
 
 
 # -------------------------
-# RANGE STREAMING SUPPORT
+# Serve HLS files
 # -------------------------
 
-@app.route("/stream/<video_id>")
-def stream(video_id):
+@app.route("/hls/<video_id>/<path:filename>")
+def hls(video_id, filename):
     db = load_db()
 
     if video_id not in db:
         return abort(404)
 
-    path = db[video_id]["file"]
+    hls_dir = db[video_id]["hls"]
 
-    if not path or not os.path.exists(path):
+    path = os.path.join(hls_dir, filename)
+
+    if not os.path.exists(path):
         return abort(404)
 
-    return send_file(
-        path,
-        mimetype="video/mp4",
-        conditional=True,   # enables range requests
-        etag=True,
-        last_modified=os.path.getmtime(path)
-    )
+    return send_file(path)
 
 
 @app.route("/download/<video_id>")
@@ -233,9 +293,7 @@ def download(video_id):
     if video_id not in db:
         return abort(404)
 
-    video = db[video_id]
-
-    return send_file(video["file"], as_attachment=True)
+    return send_file(db[video_id]["file"], as_attachment=True)
 
 
 @app.route("/rotate/<video_id>/<angle>", methods=["POST"])
@@ -258,9 +316,11 @@ def rotate(video_id, angle):
 
     cmd = [
         "ffmpeg",
+        "-y",
         "-i", input_file,
         "-vf", transpose,
         "-c:a", "copy",
+        "-movflags", "+faststart",
         output_file
     ]
 
