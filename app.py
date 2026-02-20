@@ -217,56 +217,12 @@ def stream(video_id):
     if not path or not os.path.exists(path):
         return abort(404)
 
-    file_size = os.path.getsize(path)
-    range_header = request.headers.get("Range", None)
-
-    if not range_header:
-        def generateRange():
-            with open(path, "rb") as f:
-                yield from f
-
-        return Response(
-            generateRange(),
-            status=200,
-            mimetype="video/mp4",
-            headers={
-                "Content-Length": str(file_size),
-                "Accept-Ranges": "bytes"
-            }
-        )
-
-    # Parse Range header
-    bytes_range = range_header.replace("bytes=", "")
-    start, end = bytes_range.split("-")
-
-    start = int(start) if start else 0
-    end = int(end) if end else file_size - 1
-
-    length = end - start + 1
-
-    def generate():
-        with open(path, "rb") as f:
-            f.seek(start)
-            remaining = length
-            chunk_size = 8192
-
-            while remaining > 0:
-                read_size = min(chunk_size, remaining)
-                data = f.read(read_size)
-                if not data:
-                    break
-                remaining -= len(data)
-                yield data
-
-    return Response(
-        generate(),
-        status=206,
+    return send_file(
+        path,
         mimetype="video/mp4",
-        headers={
-            "Content-Range": f"bytes {start}-{end}/{file_size}",
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(length),
-        },
+        conditional=True,   # enables range requests
+        etag=True,
+        last_modified=os.path.getmtime(path)
     )
 
 
