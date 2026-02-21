@@ -23,6 +23,11 @@ app = Flask(__name__)
 DOWNLOAD_DIR = "downloads"
 DB_FILE = os.path.join(DOWNLOAD_DIR, "database.json")
 
+# =========================
+# CONFIG (change this)
+# =========================
+DELETE_AFTER_HOURS = 48   # <-- change retention here
+
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 db_lock = threading.Lock()
@@ -58,7 +63,7 @@ def cleanup_loop():
 
         for vid in list(db.keys()):
             created = datetime.fromisoformat(db[vid]["created"])
-            if now - created > timedelta(hours=24):
+            if now - created > timedelta(hours=DELETE_AFTER_HOURS):
 
                 filepath = db[vid].get("file")
                 if filepath and os.path.exists(filepath):
@@ -208,7 +213,7 @@ def download_video(video_id, url):
 
 def hours_remaining(created_iso):
     created = datetime.fromisoformat(created_iso)
-    expires = created + timedelta(hours=24)
+    expires = created + timedelta(hours=DELETE_AFTER_HOURS)
     remaining = expires - datetime.utcnow()
     hours = max(0, int(remaining.total_seconds() // 3600))
     return hours, expires
@@ -371,7 +376,7 @@ def home():
         </div>
 
         <div class="footer">
-            Files auto-delete after 24 hours
+            Files auto-delete after {DELETE_AFTER_HOURS} hours
         </div>
 
     </div>
