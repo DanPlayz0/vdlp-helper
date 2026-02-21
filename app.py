@@ -119,7 +119,7 @@ def download_video(video_id, url):
     save_db(db)
 
     try:
-        ydl_opts = {
+        ydl_opts: yt_dlp._Params = {
             "outtmpl": filepath,
             "format": "bv*+ba/best",
             "merge_output_format": "mp4",
@@ -132,12 +132,19 @@ def download_video(video_id, url):
 
         # Start download in background
         def run_download():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+            try:
+              with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                  ydl.download([url])
 
-            db = load_db()
-            db[video_id]["status"] = "ready"
-            save_db(db)
+              db = load_db()
+              db[video_id]["status"] = "ready"
+              save_db(db)
+
+            except Exception as e:
+                db = load_db()
+                db[video_id]["status"] = "failed"
+                db[video_id]["error"] = str(e)
+                save_db(db)
 
         threading.Thread(target=run_download, daemon=True).start()
 
