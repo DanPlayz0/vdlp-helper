@@ -25,21 +25,26 @@ DB_FILE = os.path.join(DOWNLOAD_DIR, "database.json")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# Thread-safe DB lock
+db_lock = threading.Lock()
+
 
 # -------------------------
 # Database helpers
 # -------------------------
 
 def load_db():
-    if not os.path.exists(DB_FILE):
-        return {}
-    with open(DB_FILE, "r") as f:
-        return json.load(f)
+    with db_lock:
+        if not os.path.exists(DB_FILE):
+            return {}
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
 
 
 def save_db(db):
-    with open(DB_FILE, "w") as f:
-        json.dump(db, f)
+    with db_lock:
+        with open(DB_FILE, "w") as f:
+            json.dump(db, f)
 
 
 # -------------------------
@@ -57,12 +62,10 @@ def cleanup_loop():
             created = datetime.fromisoformat(db[vid]["created"])
             if now - created > timedelta(hours=24):
 
-                # delete mp4
                 filepath = db[vid].get("file")
                 if filepath and os.path.exists(filepath):
                     os.remove(filepath)
 
-                # delete hls folder
                 hls_dir = db[vid].get("hls")
                 if hls_dir and os.path.exists(hls_dir):
                     for f in os.listdir(hls_dir):
@@ -92,53 +95,105 @@ def start_hls_conversion(input_path, output_dir):
         "ffmpeg",
         "-y",
         "-i", input_path,
-        "-c", "copy",
+        "-c:v", "copy",
+        "-c:a", "copy",
         "-f", "hls",
         "-hls_time", "6",
+        "-hls_playlist_type", "vod",
         "-hls_list_size", "0",
-        "-hls_flags", "delete_segments+append_list",
+        "-hls_segment_filename",
+        os.path.join(output_dir, "seg_%03d.ts"),
         os.path.join(output_dir, "playlist.m3u8")
     ]
 
-    subprocess.Popen(cmd)
+    subprocess.run(cmd, check=True)
+
+
+def ensure_hls(video_id, video):
+    input_file = video.get("file")
+    hls_dir = video.get("hls")
+
+    if not input_file or not os.path.exists(input_file):
+        return False
+
+    if not hls_dir:
+        hls_dir = os.path.join(DOWNLOAD_DIR, f"{video_id}_hls")
+        video["hls"] = hls_dir
+
+        db = load_db()
+        db[video_id] = video
+        save_db(db)
+
+    playlist = os.path.join(hls_dir, "playlist.m3u8")
+
+    if os.path.exists(playlist):
+        return True
+
+    try:
+        start_hls_conversion(input_file, hls_dir)
+    except Exception:
+        return False
+
+    return os.path.exists(playlist)
+
+
+def repair_hls():
+    db = load_db()
+    for vid, video in db.items():
+        ensure_hls(vid, video)
+
+
+threading.Thread(target=repair_hls, daemon=True).start()
 
 
 # -------------------------
 # Download worker
 # -------------------------
 
+MAX_CONCURRENT_JOBS = 2
+job_semaphore = threading.Semaphore(MAX_CONCURRENT_JOBS)
+
+
 def download_video(video_id, url):
-    db = load_db()
 
-    filename = f"{video_id}.mp4"
-    filepath = os.path.join(DOWNLOAD_DIR, filename)
-    hls_dir = os.path.join(DOWNLOAD_DIR, f"{video_id}_hls")
+    def worker():
+        with job_semaphore:
 
-    db[video_id]["file"] = filepath
-    db[video_id]["hls"] = hls_dir
-    save_db(db)
+            db = load_db()
 
-    try:
-        ydl_opts: yt_dlp._Params = {
-            "outtmpl": filepath,
-            "format": "bv*+ba/best",
-            "merge_output_format": "mp4",
-            "postprocessors": [{
-                "key": "FFmpegVideoRemuxer",
-                "preferedformat": "mp4"
-            }],
-            "postprocessor_args": ["-movflags", "+faststart"]
-        }
+            filename = f"{video_id}.mp4"
+            filepath = os.path.join(DOWNLOAD_DIR, filename)
+            hls_dir = os.path.join(DOWNLOAD_DIR, f"{video_id}_hls")
 
-        # Start download in background
-        def run_download():
+            db[video_id]["file"] = filepath
+            db[video_id]["hls"] = hls_dir
+            db[video_id]["status"] = "downloading"
+            save_db(db)
+
+            ydl_opts: yt_dlp._Params = {
+                "outtmpl": filepath,
+                "format": "bv*+ba/best",
+                "merge_output_format": "mp4",
+                "postprocessors": [{
+                    "key": "FFmpegVideoRemuxer",
+                    "preferedformat": "mp4"
+                }],
+                "postprocessor_args": ["-movflags", "+faststart"]
+            }
+
             try:
-              with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                  ydl.download([url])
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
 
-              db = load_db()
-              db[video_id]["status"] = "ready"
-              save_db(db)
+                db = load_db()
+                db[video_id]["status"] = "converting"
+                save_db(db)
+
+                start_hls_conversion(filepath, hls_dir)
+
+                db = load_db()
+                db[video_id]["status"] = "ready"
+                save_db(db)
 
             except Exception as e:
                 db = load_db()
@@ -146,21 +201,7 @@ def download_video(video_id, url):
                 db[video_id]["error"] = str(e)
                 save_db(db)
 
-        threading.Thread(target=run_download, daemon=True).start()
-
-        # Wait until file starts growing then start HLS
-        while not os.path.exists(filepath):
-            time.sleep(1)
-
-        start_hls_conversion(filepath, hls_dir)
-
-        db[video_id]["status"] = "processing"
-        save_db(db)
-
-    except Exception as e:
-        db[video_id]["status"] = "failed"
-        db[video_id]["error"] = str(e)
-        save_db(db)
+    threading.Thread(target=worker, daemon=True).start()
 
 
 # -------------------------
@@ -173,13 +214,12 @@ def home():
 
     if request.method == "POST":
         url = request.form["url"]
-
         video_id = str(uuid.uuid4())
 
         db[video_id] = {
             "id": video_id,
             "url": url,
-            "status": "processing",
+            "status": "queued",
             "created": datetime.utcnow().isoformat(),
             "file": "",
             "hls": ""
@@ -187,11 +227,7 @@ def home():
 
         save_db(db)
 
-        threading.Thread(
-            target=download_video,
-            args=(video_id, url),
-            daemon=True
-        ).start()
+        download_video(video_id, url)
 
         return redirect(url_for("home"))
 
@@ -280,15 +316,18 @@ def video_page(video_id):
 def hls(video_id, filename):
     db = load_db()
 
-    if video_id not in db:
-        return abort(404)
+    video = db.get(video_id)
+    if not video:
+        return abort(404, description="Video not found")
 
-    hls_dir = db[video_id]["hls"]
+    if not ensure_hls(video_id, video):
+        return abort(404, description="HLS not ready")
 
+    hls_dir = video.get("hls")
     path = os.path.join(hls_dir, filename)
 
     if not os.path.exists(path):
-        return abort(404)
+        return abort(404, description="File not found")
 
     return send_file(path)
 
@@ -297,22 +336,28 @@ def hls(video_id, filename):
 def download(video_id):
     db = load_db()
 
-    if video_id not in db:
-        return abort(404)
+    video = db.get(video_id)
+    if not video:
+        return abort(404, description="Video not found")
 
-    return send_file(db[video_id]["file"], as_attachment=True)
+    video_file = video.get("file")
+    if not video_file or not os.path.exists(video_file):
+        return abort(404, description="Video file not found")
+
+    return send_file(video_file, as_attachment=True)
 
 
 @app.route("/rotate/<video_id>/<angle>", methods=["POST"])
 def rotate(video_id, angle):
     db = load_db()
 
-    if video_id not in db:
-        return abort(404)
-
-    video = db[video_id]
+    video = db.get(video_id)
+    if not video:
+        return abort(404, description="Video not found")
 
     input_file = video["file"]
+    hls_dir = video.get("hls")
+
     output_file = input_file.replace(".mp4", "_rotated.mp4")
 
     transpose = {
@@ -331,10 +376,16 @@ def rotate(video_id, angle):
         output_file
     ]
 
-    subprocess.run(cmd)
+    subprocess.run(cmd, check=True)
 
     os.remove(input_file)
     os.rename(output_file, input_file)
+
+    if hls_dir:
+        try:
+            start_hls_conversion(input_file, hls_dir)
+        except Exception:
+            pass
 
     return redirect(url_for("video_page", video_id=video_id))
 
