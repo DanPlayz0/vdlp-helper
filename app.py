@@ -219,6 +219,7 @@ def hours_remaining(created_iso):
 # -------------------------
 
 BASE_STYLE = """
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
 <style>
 * { box-sizing: border-box; }
 body {
