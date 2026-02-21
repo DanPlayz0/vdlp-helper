@@ -25,7 +25,6 @@ DB_FILE = os.path.join(DOWNLOAD_DIR, "database.json")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Thread-safe DB lock
 db_lock = threading.Lock()
 
 
@@ -55,7 +54,6 @@ def cleanup_loop():
     while True:
         db = load_db()
         now = datetime.utcnow()
-
         changed = False
 
         for vid in list(db.keys()):
@@ -205,6 +203,18 @@ def download_video(video_id, url):
 
 
 # -------------------------
+# Helpers
+# -------------------------
+
+def hours_remaining(created_iso):
+    created = datetime.fromisoformat(created_iso)
+    expires = created + timedelta(hours=24)
+    remaining = expires - datetime.utcnow()
+    hours = max(0, int(remaining.total_seconds() // 3600))
+    return hours, expires
+
+
+# -------------------------
 # Routes
 # -------------------------
 
@@ -216,6 +226,20 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: #0f172a;
     color: #e5e7eb;
+}
+.header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.back {
+    background: #1f2937;
+    border: none;
+    color: white;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 14px;
 }
 .container {
     max-width: 640px;
@@ -305,12 +329,16 @@ def home():
         }
 
         save_db(db)
-
         download_video(video_id, url)
 
         return redirect(url_for("home"))
 
     videos = list(db.values())[::-1]
+
+    enriched = []
+    for v in videos:
+        hrs, exp = hours_remaining(v["created"])
+        enriched.append({**v, "hours_left": hrs, "expires": exp})
 
     return render_template_string(f"""
     {BASE_STYLE}
@@ -330,7 +358,9 @@ def home():
             {{% for v in videos %}}
                 <div class="video-item">
                     <a href="/video/{{{{v.id}}}}">{{{{v.url}}}}</a>
-                    <div class="status">Status: {{{{v.status}}}}</div>
+                    <div class="status">
+                        Status: {{{{v.status}}}} • Deletes in {{{{v.hours_left}}}}h
+                    </div>
                 </div>
             {{% endfor %}}
 
@@ -344,7 +374,7 @@ def home():
         </div>
 
     </div>
-    """, videos=videos)
+    """, videos=enriched)
 
 
 @app.route("/video/<video_id>")
@@ -355,14 +385,23 @@ def video_page(video_id):
         return "Not found"
 
     video = db[video_id]
+    hrs, exp = hours_remaining(video["created"])
 
     return render_template_string(f"""
     {BASE_STYLE}
     <div class="container">
 
+        <div class="header">
+            <a href="/"><button class="back">← Back</button></a>
+            <div>
+                <div><strong>Video</strong></div>
+                <div class="status">
+                    Status: {{{{video.status}}}} • Deletes in {hrs}h
+                </div>
+            </div>
+        </div>
+
         <div class="card">
-            <h2>Video</h2>
-            <div class="status">Status: {{{{video.status}}}}</div>
 
             <video id="video" controls playsinline></video>
 
@@ -398,9 +437,6 @@ def video_page(video_id):
                     <button class="secondary">270°</button>
                 </form>
             </div>
-
-            <br>
-            <a href="/">← Back</a>
 
         </div>
     </div>
