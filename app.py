@@ -208,6 +208,85 @@ def download_video(video_id, url):
 # Routes
 # -------------------------
 
+BASE_STYLE = """
+<style>
+* { box-sizing: border-box; }
+body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f172a;
+    color: #e5e7eb;
+}
+.container {
+    max-width: 640px;
+    margin: auto;
+    padding: 16px;
+}
+.card {
+    background: #111827;
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 16px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+}
+h1, h2, h3 {
+    margin-top: 0;
+}
+input {
+    width: 100%;
+    padding: 14px;
+    border-radius: 12px;
+    border: none;
+    margin-bottom: 10px;
+    font-size: 16px;
+}
+button {
+    width: 100%;
+    padding: 14px;
+    border-radius: 12px;
+    border: none;
+    background: #3b82f6;
+    color: white;
+    font-weight: 600;
+    font-size: 16px;
+}
+button.secondary {
+    background: #374151;
+}
+a {
+    color: #60a5fa;
+    text-decoration: none;
+    word-break: break-all;
+}
+.video-item {
+    padding: 10px 0;
+    border-bottom: 1px solid #1f2937;
+}
+.status {
+    font-size: 14px;
+    opacity: 0.8;
+}
+video {
+    width: 100%;
+    border-radius: 12px;
+    background: black;
+}
+.actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+    margin-top: 12px;
+}
+.footer {
+    margin-top: 20px;
+    text-align: center;
+    font-size: 14px;
+    opacity: 0.6;
+}
+</style>
+"""
+
+
 @app.route("/", methods=["GET", "POST"])
 def home():
     db = load_db()
@@ -233,24 +312,38 @@ def home():
 
     videos = list(db.values())[::-1]
 
-    return render_template_string("""
-    <h1>What link would you like to download?</h1>
+    return render_template_string(f"""
+    {BASE_STYLE}
+    <div class="container">
 
-    <form method="POST">
-        <input name="url" style="width:300px" required>
-        <button>Download</button>
-    </form>
+        <div class="card">
+            <h1>📥 Video Downloader</h1>
+            <form method="POST">
+                <input name="url" placeholder="Paste video link..." required>
+                <button>Download</button>
+            </form>
+        </div>
 
-    <h2>Previously Requested</h2>
+        <div class="card">
+            <h2>Recent</h2>
 
-    <ul>
-    {% for v in videos %}
-        <li>
-            <a href="/video/{{v.id}}">{{v.url}}</a>
-            — {{v.status}}
-        </li>
-    {% endfor %}
-    </ul>
+            {{% for v in videos %}}
+                <div class="video-item">
+                    <a href="/video/{{{{v.id}}}}">{{{{v.url}}}}</a>
+                    <div class="status">Status: {{{{v.status}}}}</div>
+                </div>
+            {{% endfor %}}
+
+            {{% if not videos %}}
+                <div class="status">No downloads yet</div>
+            {{% endif %}}
+        </div>
+
+        <div class="footer">
+            Files auto-delete after 24 hours
+        </div>
+
+    </div>
     """, videos=videos)
 
 
@@ -263,48 +356,54 @@ def video_page(video_id):
 
     video = db[video_id]
 
-    return render_template_string("""
-    <h1>Video</h1>
+    return render_template_string(f"""
+    {BASE_STYLE}
+    <div class="container">
 
-    <p>Status: {{video.status}}</p>
+        <div class="card">
+            <h2>Video</h2>
+            <div class="status">Status: {{{{video.status}}}}</div>
 
-    <video id="video" width="400" controls playsinline></video>
+            <video id="video" controls playsinline></video>
 
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+            <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 
-    <script>
-    const video = document.getElementById('video');
-    const src = "/hls/{{video.id}}/playlist.m3u8";
+            <script>
+            const video = document.getElementById('video');
+            const src = "/hls/{{{{video.id}}}}/playlist.m3u8";
 
-    if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = src;
-    } else if (Hls.isSupported()) {
-        const hls = new Hls();
-        hls.loadSource(src);
-        hls.attachMedia(video);
-    }
-    </script>
+            if (video.canPlayType('application/vnd.apple.mpegurl')) {{
+                video.src = src;
+            }} else if (Hls.isSupported()) {{
+                const hls = new Hls();
+                hls.loadSource(src);
+                hls.attachMedia(video);
+            }}
+            </script>
 
-    <br><br>
+            <br>
 
-    <a href="/download/{{video.id}}">Download MP4</a>
+            <a href="/download/{{{{video.id}}}}">
+                <button>⬇️ Download MP4</button>
+            </a>
 
-    <h3>Rotate</h3>
+            <div class="actions">
+                <form method="POST" action="/rotate/{{{{video.id}}}}/90">
+                    <button class="secondary">90°</button>
+                </form>
+                <form method="POST" action="/rotate/{{{{video.id}}}}/180">
+                    <button class="secondary">180°</button>
+                </form>
+                <form method="POST" action="/rotate/{{{{video.id}}}}/270">
+                    <button class="secondary">270°</button>
+                </form>
+            </div>
 
-    <form method="POST" action="/rotate/{{video.id}}/90">
-        <button>Rotate 90°</button>
-    </form>
+            <br>
+            <a href="/">← Back</a>
 
-    <form method="POST" action="/rotate/{{video.id}}/180">
-        <button>Rotate 180°</button>
-    </form>
-
-    <form method="POST" action="/rotate/{{video.id}}/270">
-        <button>Rotate 270°</button>
-    </form>
-
-    <br><br>
-    <a href="/">Back</a>
+        </div>
+    </div>
     """, video=video)
 
 
